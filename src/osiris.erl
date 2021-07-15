@@ -10,7 +10,7 @@
 -include("osiris.hrl").
 
 -export([write/4,
-         write_tracking/3,
+         write_tracking/4,
          read_tracking/2,
          read_tracking/1,
          fetch_writer_seq/2,
@@ -130,9 +130,9 @@ start_replica(Replica, Config) ->
 write(Pid, WriterId, Corr, Data) ->
     osiris_writer:write(Pid, self(), WriterId, Corr, Data).
 
--spec write_tracking(pid(), binary(), offset()) -> ok.
-write_tracking(Pid, TrackingId, Offset) ->
-    osiris_writer:write_tracking(Pid, TrackingId, Offset).
+-spec write_tracking(pid(), binary(), offset | timestamp, offset() | milliseconds()) -> ok.
+write_tracking(Pid, TrackingId, TrackingType, TrackingData) ->
+    osiris_writer:write_tracking(Pid, TrackingId, TrackingType, TrackingData).
 
 -spec read_tracking(pid(), binary()) -> {tracking_type(), offset()} | undefined.
 read_tracking(Pid, TrackingId) ->

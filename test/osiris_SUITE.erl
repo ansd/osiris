@@ -1029,13 +1029,13 @@ tracking(Config) ->
     TrackId = <<"tracking-id-1">>,
 
     ?assertEqual(undefined, osiris:read_tracking(Leader, TrackId)),
-    ok = osiris:write_tracking(Leader, TrackId, 0),
+    ok = osiris:write_tracking(Leader, TrackId, offset, 0),
     %% need to sleep a little else we may try to write and read in the same
     %% batch which due to batch reversal isn't possible. This should be ok
     %% given the use case for reading tracking
     timer:sleep(100),
     ?assertEqual({offset, 0}, osiris:read_tracking(Leader, TrackId)),
-    ok = osiris:write_tracking(Leader, TrackId, 1),
+    ok = osiris:write_tracking(Leader, TrackId, offset, 1),
     timer:sleep(100),
     ?assertEqual({offset, 1}, osiris:read_tracking(Leader, TrackId)),
     ok = osiris:stop_cluster(Conf0),
@@ -1062,10 +1062,10 @@ tracking_many(Config) ->
     end,
     TrackId = <<"tracking-id-1">>,
     ?assertEqual(undefined, osiris:read_tracking(Leader, TrackId)),
-    ok = osiris:write_tracking(Leader, TrackId, 0),
-    ok = osiris:write_tracking(Leader, TrackId, 1),
-    ok = osiris:write_tracking(Leader, TrackId, 2),
-    ok = osiris:write_tracking(Leader, TrackId, 3),
+    ok = osiris:write_tracking(Leader, TrackId, offset, 0),
+    ok = osiris:write_tracking(Leader, TrackId, offset, 1),
+    ok = osiris:write_tracking(Leader, TrackId, offset, 2),
+    ok = osiris:write_tracking(Leader, TrackId, offset, 3),
     timer:sleep(250),
     ?assertEqual({offset, 3}, osiris:read_tracking(Leader, TrackId)),
     ok.
@@ -1092,9 +1092,9 @@ tracking_all(Config) ->
     TrackId3 = <<"tracking-id-3">>,
     ?assertMatch(#{offsets := O} when map_size(O) == 0,
                                       osiris:read_tracking(Leader)),
-    ok = osiris:write_tracking(Leader, TrackId1, 0),
-    ok = osiris:write_tracking(Leader, TrackId2, 1),
-    ok = osiris:write_tracking(Leader, TrackId3, 2),
+    ok = osiris:write_tracking(Leader, TrackId1, offset, 0),
+    ok = osiris:write_tracking(Leader, TrackId2, offset, 1),
+    ok = osiris:write_tracking(Leader, TrackId3, offset, 2),
     timer:sleep(250),
     ?assertMatch(#{offsets := #{TrackId1 := 0,
                                 TrackId2 := 1,
@@ -1103,9 +1103,9 @@ tracking_all(Config) ->
 
 tracking_retention(Config) ->
     _PrivDir = ?config(data_dir, Config),
-    Num = 150000,
+    Num = 150_000,
     Name = ?config(cluster_name, Config),
-    SegSize = 50000 * 1000,
+    SegSize = 50_000 * 1000,
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -1117,9 +1117,9 @@ tracking_retention(Config) ->
         osiris:start_cluster(Conf0),
     timer:sleep(500),
     TrkId = <<"trkid1">>,
-    osiris:write_tracking(Leader, TrkId, 5),
+    osiris:write_tracking(Leader, TrkId, offset, 5),
     TrkId2 = <<"trkid2">>,
-    osiris:write_tracking(Leader, TrkId2, Num),
+    osiris:write_tracking(Leader, TrkId2, offset, Num),
     write_n(Leader, Num, 0, 1000 * 8, #{}),
     timer:sleep(1000),
     %% tracking id should be gone
