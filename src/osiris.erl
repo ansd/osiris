@@ -11,7 +11,7 @@
 
 -export([write/4,
          write_tracking/4,
-         read_tracking/2,
+         read_tracking/3,
          read_tracking/1,
          fetch_writer_seq/2,
          init_reader/3,
@@ -134,9 +134,9 @@ write(Pid, WriterId, Corr, Data) ->
 write_tracking(Pid, TrackingId, TrackingType, TrackingData) ->
     osiris_writer:write_tracking(Pid, TrackingId, TrackingType, TrackingData).
 
--spec read_tracking(pid(), binary()) -> {tracking_type(), offset()} | undefined.
-read_tracking(Pid, TrackingId) ->
-    osiris_writer:read_tracking(Pid, TrackingId).
+-spec read_tracking(pid(), tracking_type(), binary()) -> {tracking_type(), offset()} | undefined.
+read_tracking(Pid, TrackingType, TrackingId) ->
+    osiris_writer:read_tracking(Pid, TrackingType, TrackingId).
 
 -spec read_tracking(pid()) -> map().
 read_tracking(Pid) ->

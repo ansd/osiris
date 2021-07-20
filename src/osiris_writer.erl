@@ -20,7 +20,7 @@
          ack/2,
          write/5,
          write_tracking/4,
-         read_tracking/2,
+         read_tracking/3,
          read_tracking/1,
          query_writers/2,
          query_replication_state/1,
@@ -129,8 +129,8 @@ write_tracking(Pid, TrackingId, TrackingType, TrackingData)
          andalso is_integer(TrackingData) ->
     gen_batch_server:cast(Pid, {write_tracking, TrackingId, TrackingType, TrackingData}).
 
-read_tracking(Pid, TrackingId) ->
-    gen_batch_server:call(Pid, {read_tracking, offset, TrackingId}).
+read_tracking(Pid, TrackingType, TrackingId) ->
+    gen_batch_server:call(Pid, {read_tracking, TrackingType, TrackingId}).
 
 read_tracking(Pid) ->
     gen_batch_server:call(Pid, read_tracking).

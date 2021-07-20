@@ -46,9 +46,12 @@ all_tests() ->
      retention_overtakes_offset_reader,
      update_retention,
      update_retention_replica,
-     tracking,
-     tracking_many,
-     tracking_all,
+     tracking_offset,
+     tracking_timestamp,
+     tracking_offset_many,
+     tracking_timestamp_many,
+     tracking_offset_all,
+     tracking_timestamp_all,
      tracking_retention,
      single_node_deduplication,
      single_node_deduplication_2,
@@ -1009,7 +1012,13 @@ update_retention_replica(Config) ->
     [slave:stop(N) || N <- Nodes],
     ok.
 
-tracking(Config) ->
+tracking_offset(Config) ->
+    tracking(Config, offset).
+
+tracking_timestamp(Config) ->
+    tracking(Config, timestamp).
+
+tracking(Config, TrkType) ->
     Name = ?config(cluster_name, Config),
     Conf0 =
         #{name => Name,
@@ -1026,24 +1035,30 @@ tracking(Config) ->
         flush(),
         exit(osiris_written_timeout)
     end,
-    TrackId = <<"tracking-id-1">>,
+    TrackId1 = <<"tracking-id-1">>,
 
-    ?assertEqual(undefined, osiris:read_tracking(Leader, TrackId)),
-    ok = osiris:write_tracking(Leader, TrackId, offset, 0),
+    ?assertEqual(undefined, osiris:read_tracking(Leader, TrkType, TrackId1)),
+    ok = osiris:write_tracking(Leader, TrackId1, TrkType, 0),
     %% need to sleep a little else we may try to write and read in the same
     %% batch which due to batch reversal isn't possible. This should be ok
     %% given the use case for reading tracking
     timer:sleep(100),
-    ?assertEqual({offset, 0}, osiris:read_tracking(Leader, TrackId)),
-    ok = osiris:write_tracking(Leader, TrackId, offset, 1),
+    ?assertEqual({TrkType, 0}, osiris:read_tracking(Leader, TrkType, TrackId1)),
+    ok = osiris:write_tracking(Leader, TrackId1, TrkType, 1),
     timer:sleep(100),
-    ?assertEqual({offset, 1}, osiris:read_tracking(Leader, TrackId)),
+    ?assertEqual({TrkType, 1}, osiris:read_tracking(Leader, TrkType, TrackId1)),
     ok = osiris:stop_cluster(Conf0),
     {ok, #{leader_pid := Leader2}} = osiris:start_cluster(Conf0#{epoch => 2}),
-    ?assertEqual({offset, 1}, osiris:read_tracking(Leader2, TrackId)),
+    ?assertEqual({TrkType, 1}, osiris:read_tracking(Leader2, TrkType, TrackId1)),
     ok.
 
-tracking_many(Config) ->
+tracking_offset_many(Config) ->
+    tracking_many(Config, offset).
+
+tracking_timestamp_many(Config) ->
+    tracking_many(Config, timestamp).
+
+tracking_many(Config, TrkType) ->
     Name = ?config(cluster_name, Config),
     Conf0 =
         #{name => Name,
@@ -1061,16 +1076,22 @@ tracking_many(Config) ->
         exit(osiris_written_timeout)
     end,
     TrackId = <<"tracking-id-1">>,
-    ?assertEqual(undefined, osiris:read_tracking(Leader, TrackId)),
-    ok = osiris:write_tracking(Leader, TrackId, offset, 0),
-    ok = osiris:write_tracking(Leader, TrackId, offset, 1),
-    ok = osiris:write_tracking(Leader, TrackId, offset, 2),
-    ok = osiris:write_tracking(Leader, TrackId, offset, 3),
+    ?assertEqual(undefined, osiris:read_tracking(Leader, TrkType, TrackId)),
+    ok = osiris:write_tracking(Leader, TrackId, TrkType, 0),
+    ok = osiris:write_tracking(Leader, TrackId, TrkType, 1),
+    ok = osiris:write_tracking(Leader, TrackId, TrkType, 2),
+    ok = osiris:write_tracking(Leader, TrackId, TrkType, 3),
     timer:sleep(250),
-    ?assertEqual({offset, 3}, osiris:read_tracking(Leader, TrackId)),
+    ?assertEqual({TrkType, 3}, osiris:read_tracking(Leader, TrkType, TrackId)),
     ok.
 
-tracking_all(Config) ->
+tracking_offset_all(Config) ->
+    tracking_all(Config, offset).
+
+tracking_timestamp_all(Config) ->
+    tracking_all(Config, timestamp).
+
+tracking_all(Config, TrkType) ->
     Name = ?config(cluster_name, Config),
     Conf0 =
         #{name => Name,
@@ -1092,13 +1113,16 @@ tracking_all(Config) ->
     TrackId3 = <<"tracking-id-3">>,
     ?assertMatch(#{offsets := O} when map_size(O) == 0,
                                       osiris:read_tracking(Leader)),
-    ok = osiris:write_tracking(Leader, TrackId1, offset, 0),
-    ok = osiris:write_tracking(Leader, TrackId2, offset, 1),
-    ok = osiris:write_tracking(Leader, TrackId3, offset, 2),
+    ?assertMatch(#{timestamps := Ts} when map_size(Ts) == 0,
+                                      osiris:read_tracking(Leader)),
+    ok = osiris:write_tracking(Leader, TrackId1, TrkType, 0),
+    ok = osiris:write_tracking(Leader, TrackId2, TrkType, 1),
+    ok = osiris:write_tracking(Leader, TrackId3, TrkType, 2),
     timer:sleep(250),
-    ?assertMatch(#{offsets := #{TrackId1 := 0,
-                                TrackId2 := 1,
-                                TrackId3 := 2}}, osiris:read_tracking(Leader)),
+    Key = list_to_atom(atom_to_list(TrkType) ++ "s"),
+    ?assertMatch(#{Key := #{TrackId1 := 0,
+                            TrackId2 := 1,
+                            TrackId3 := 2}}, osiris:read_tracking(Leader)),
     ok.
 
 tracking_retention(Config) ->
@@ -1120,11 +1144,18 @@ tracking_retention(Config) ->
     osiris:write_tracking(Leader, TrkId, offset, 5),
     TrkId2 = <<"trkid2">>,
     osiris:write_tracking(Leader, TrkId2, offset, Num),
+    Now = erlang:system_time(millisecond),
+    TrkId3 = <<"trkid3">>,
+    osiris:write_tracking(Leader, TrkId3, timestamp, Now),
+    TrkId4 = <<"trkid4">>,
+    osiris:write_tracking(Leader, TrkId4, timestamp, Now + 5_000),
     write_n(Leader, Num, 0, 1000 * 8, #{}),
     timer:sleep(1000),
     %% tracking id should be gone
-    ?assertEqual(undefined, osiris:read_tracking(Leader, TrkId)),
-    ?assertEqual({offset, Num}, osiris:read_tracking(Leader, TrkId2)),
+    ?assertEqual(undefined, osiris:read_tracking(Leader, offset, TrkId)),
+    ?assertEqual({offset, Num}, osiris:read_tracking(Leader, offset, TrkId2)),
+    ?assertEqual(undefined, osiris:read_tracking(Leader, timestamp, TrkId3)),
+    ?assertEqual({timestamp, Now + 5_000}, osiris:read_tracking(Leader, timestamp, TrkId4)),
     ok.
 
 single_node_deduplication(Config) ->
