@@ -48,6 +48,7 @@ all_tests() ->
      update_retention_replica,
      tracking_offset,
      tracking_timestamp,
+     tracking_offset_and_timestamp_same_id,
      tracking_offset_many,
      tracking_timestamp_many,
      tracking_offset_all,
@@ -1050,6 +1051,42 @@ tracking(Config, TrkType) ->
     ok = osiris:stop_cluster(Conf0),
     {ok, #{leader_pid := Leader2}} = osiris:start_cluster(Conf0#{epoch => 2}),
     ?assertEqual({TrkType, 1}, osiris:read_tracking(Leader2, TrkType, TrackId1)),
+    ok.
+
+%% Tests that the same tracking ID can use both offsets and timestamps at the same time.
+tracking_offset_and_timestamp_same_id(Config) ->
+    Name = ?config(cluster_name, Config),
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => node(),
+          replica_nodes => [],
+          dir => ?config(priv_dir, Config)},
+    {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
+    ok = osiris:write(Leader, undefined, 42, <<"mah-data">>),
+    receive
+        {osiris_written, _Name, _, [42]} ->
+            ok
+    after 2000 ->
+        flush(),
+        exit(osiris_written_timeout)
+    end,
+    TrackId = <<"tracking-id-1">>,
+
+    ?assertEqual(undefined, osiris:read_tracking(Leader, offset, TrackId)),
+    ?assertEqual(undefined, osiris:read_tracking(Leader, timestamp, TrackId)),
+    ok = osiris:write_tracking(Leader, TrackId, offset, 1),
+    ok = osiris:write_tracking(Leader, TrackId, timestamp, 3),
+    %% need to sleep a little else we may try to write and read in the same
+    %% batch which due to batch reversal isn't possible. This should be ok
+    %% given the use case for reading tracking
+    timer:sleep(100),
+    ?assertEqual({offset, 1}, osiris:read_tracking(Leader, offset, TrackId)),
+    ?assertEqual({timestamp, 3}, osiris:read_tracking(Leader, timestamp, TrackId)),
+    ok = osiris:stop_cluster(Conf0),
+    {ok, #{leader_pid := Leader2}} = osiris:start_cluster(Conf0#{epoch => 2}),
+    ?assertEqual({offset, 1}, osiris:read_tracking(Leader2, offset, TrackId)),
+    ?assertEqual({timestamp, 3}, osiris:read_tracking(Leader2, timestamp, TrackId)),
     ok.
 
 tracking_offset_many(Config) ->

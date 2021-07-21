@@ -25,11 +25,9 @@
 -type tracking() :: non_neg_integer() | osiris:offset() | osiris:milliseconds().
 
 -record(?MODULE, {cfg = #cfg{} :: #cfg{},
-                  pending = #{} :: #{sequences | offsets | timestamps =>
-                                     #{tracking_id() =>
-                                       {tracking_type(), tracking()}}},
-                  sequences = #{} :: #{osiris:writer_id() => {osiris:offset(),
-                                                              non_neg_integer()}},
+                  pending = init_pending() :: #{sequences | offsets | timestamps =>
+                                                #{tracking_id() => tracking()}},
+                  sequences = #{} :: #{osiris:writer_id() => {osiris:offset(), non_neg_integer()}},
                   offsets = #{} :: #{tracking_id() => osiris:offset()},
                   timestamps = #{} :: #{tracking_id() => osiris:milliseconds()}
                  }).
@@ -42,6 +40,11 @@
               tracking_id/0
               ]).
 
+init_pending() ->
+    #{sequences => #{},
+      offsets => #{},
+      timestamps => #{}}.
+
 -spec init(undefined | binary()) -> state().
 init(undefined) ->
     #?MODULE{};
@@ -50,33 +53,40 @@ init(Bin) when is_binary(Bin) ->
 
 -spec add(tracking_id(), tracking_type(), tracking(), osiris:offset() | undefined,
           state()) -> state().
-add(TrkId, TrkType, Tracking, ChunkId,
-    #?MODULE{pending = Pend0} = State)
-  when is_integer(Tracking) andalso
-       byte_size(TrkId) =< 256 ->
-    Pend = Pend0#{TrkId => {TrkType, Tracking}},
-    update_tracking(TrkId, TrkType, Tracking,
+add(TrkId, TrkType, TrkData, ChunkId,
+    #?MODULE{pending = Pend0} = State) when is_integer(TrkData) andalso
+                                            byte_size(TrkId) =< 256 ->
+    Type = plural(TrkType),
+    Trackings0 = maps:get(Type, Pend0),
+    Trackings1 = Trackings0#{TrkId => TrkData},
+    Pend = Pend0#{Type := Trackings1},
+    update_tracking(TrkId, TrkType, TrkData,
                     ChunkId, State#?MODULE{pending = Pend}).
 
+%% Convert for example 'offset' to 'offsets'.
+plural(Word) when is_atom(Word) ->
+    list_to_atom(atom_to_list(Word) ++ "s").
 
 -spec flush(state()) -> {iodata(), state()}.
 flush(#?MODULE{pending = Pending} = State) ->
-    TData = maps:fold(fun(K, {Type, V}, Acc) ->
-                              T = case Type of
-                                      sequence ->
+    TData = maps:fold(fun(TrkType, TrackingMap, Acc) ->
+                              T = case TrkType of
+                                      sequences ->
                                           ?TRK_TYPE_SEQUENCE;
-                                      offset ->
+                                      offsets ->
                                           ?TRK_TYPE_OFFSET;
-                                      timestamp ->
+                                      timestamps ->
                                           ?TRK_TYPE_TIMESTAMP
                                   end,
-                              [<<T:8/unsigned,
-                                 (byte_size(K)):8/unsigned,
-                                 K/binary,
-                                 V:64/integer>> | Acc]
-                      end,
-                      [], Pending),
-    {TData, State#?MODULE{pending = #{}}}.
+                              TData0 = maps:fold(fun(TrkId, TrkData, Acc0) ->
+                                                         [<<T:8/unsigned,
+                                                            (byte_size(TrkId)):8/unsigned,
+                                                            TrkId/binary,
+                                                            TrkData:64/integer>> | Acc0]
+                                                 end, [], TrackingMap),
+                              [TData0| Acc]
+                      end, [], Pending),
+    {TData, State#?MODULE{pending = init_pending()}}.
 
 -spec snapshot(osiris:offset(), osiris:milliseconds(), state()) ->
     {iodata(), state()}.
@@ -113,10 +123,10 @@ snapshot(FirstOffset, FirstTimestamp, #?MODULE{sequences = Seqs0,
                                 Ts:64/signed>>
                               | Acc]
                      end, Data1, Timestamps),
-    {Data2, State#?MODULE{pending = #{},
-                         sequences = Seqs,
-                         offsets = Offsets,
-                         timestamps = Timestamps}}.
+    {Data2, State#?MODULE{pending = init_pending(),
+                          sequences = Seqs,
+                          offsets = Offsets,
+                          timestamps = Timestamps}}.
 
 -spec query(tracking_id(), TrkType :: tracking_type(), state()) ->
     {ok, term()} | {error, not_found}.
@@ -151,8 +161,12 @@ append_trailer(ChId, Bin, State) ->
     parse_trailer(Bin, ChId, State).
 
 -spec needs_flush(state()) -> boolean().
-needs_flush(#?MODULE{pending = Pend}) ->
-    map_size(Pend) > 0.
+needs_flush(#?MODULE{pending = #{sequences := Sequences,
+                                 offsets := Offsets,
+                                 timestamps := Timestamps}}) ->
+    map_size(Sequences) > 0 orelse
+    map_size(Offsets) > 0 orelse
+    map_size(Timestamps) > 0.
 
 -spec is_empty(state()) -> boolean().
 is_empty(#?MODULE{sequences = Seqs, offsets = Offs, timestamps = Timestamps}) ->
