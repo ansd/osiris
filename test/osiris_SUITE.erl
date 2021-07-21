@@ -1036,21 +1036,21 @@ tracking(Config, TrkType) ->
         flush(),
         exit(osiris_written_timeout)
     end,
-    TrackId1 = <<"tracking-id-1">>,
+    TrackId = <<"tracking-id-1">>,
 
-    ?assertEqual(undefined, osiris:read_tracking(Leader, TrkType, TrackId1)),
-    ok = osiris:write_tracking(Leader, TrackId1, TrkType, 0),
+    ?assertEqual(undefined, osiris:read_tracking(Leader, TrkType, TrackId)),
+    ok = osiris:write_tracking(Leader, TrackId, TrkType, 0),
     %% need to sleep a little else we may try to write and read in the same
     %% batch which due to batch reversal isn't possible. This should be ok
     %% given the use case for reading tracking
     timer:sleep(100),
-    ?assertEqual({TrkType, 0}, osiris:read_tracking(Leader, TrkType, TrackId1)),
-    ok = osiris:write_tracking(Leader, TrackId1, TrkType, 1),
+    ?assertEqual({TrkType, 0}, osiris:read_tracking(Leader, TrkType, TrackId)),
+    ok = osiris:write_tracking(Leader, TrackId, TrkType, 1),
     timer:sleep(100),
-    ?assertEqual({TrkType, 1}, osiris:read_tracking(Leader, TrkType, TrackId1)),
+    ?assertEqual({TrkType, 1}, osiris:read_tracking(Leader, TrkType, TrackId)),
     ok = osiris:stop_cluster(Conf0),
     {ok, #{leader_pid := Leader2}} = osiris:start_cluster(Conf0#{epoch => 2}),
-    ?assertEqual({TrkType, 1}, osiris:read_tracking(Leader2, TrkType, TrackId1)),
+    ?assertEqual({TrkType, 1}, osiris:read_tracking(Leader2, TrkType, TrackId)),
     ok.
 
 %% Tests that the same tracking ID can use both offsets and timestamps at the same time.
@@ -1148,10 +1148,9 @@ tracking_all(Config, TrkType) ->
     TrackId1 = <<"tracking-id-1">>,
     TrackId2 = <<"tracking-id-2">>,
     TrackId3 = <<"tracking-id-3">>,
-    ?assertMatch(#{offsets := O} when map_size(O) == 0,
-                                      osiris:read_tracking(Leader)),
-    ?assertMatch(#{timestamps := Ts} when map_size(Ts) == 0,
-                                      osiris:read_tracking(Leader)),
+    ?assertMatch(#{offsets := Off, timestamps := Ts}
+                   when map_size(Off) == 0 andalso map_size(Ts) == 0,
+                        osiris:read_tracking(Leader)),
     ok = osiris:write_tracking(Leader, TrackId1, TrkType, 0),
     ok = osiris:write_tracking(Leader, TrackId2, TrkType, 1),
     ok = osiris:write_tracking(Leader, TrackId3, TrkType, 2),

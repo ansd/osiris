@@ -130,11 +130,12 @@ start_replica(Replica, Config) ->
 write(Pid, WriterId, Corr, Data) ->
     osiris_writer:write(Pid, self(), WriterId, Corr, Data).
 
--spec write_tracking(pid(), binary(), offset | timestamp, offset() | milliseconds()) -> ok.
+-spec write_tracking(pid(), binary(), tracking_type(), offset() | milliseconds()) -> ok.
 write_tracking(Pid, TrackingId, TrackingType, TrackingData) ->
     osiris_writer:write_tracking(Pid, TrackingId, TrackingType, TrackingData).
 
--spec read_tracking(pid(), tracking_type(), binary()) -> {tracking_type(), offset()} | undefined.
+-spec read_tracking(pid(), tracking_type(), binary()) ->
+    {tracking_type(), offset() | milliseconds()} | undefined.
 read_tracking(Pid, TrackingType, TrackingId) ->
     osiris_writer:read_tracking(Pid, TrackingType, TrackingId).
 

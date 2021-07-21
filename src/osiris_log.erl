@@ -2194,8 +2194,8 @@ trigger_retention_eval(#?MODULE{cfg =
                                          first_offset_fun = Fun}} = State) ->
     ok =
         osiris_retention:eval(Dir, RetentionSpec,
-                              %% updates the first offset after retention has
-                              %% been evaluated
+                              %% updates first offset and first timestamp
+                              %% after retention has been evaluated
                               fun ({{FstOff, _}, FstTs, Seg}) when is_integer(FstOff),
                                                                    is_integer(FstTs) ->
                                       Fun(FstOff),
