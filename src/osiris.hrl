@@ -43,5 +43,47 @@
 -define(CHNK_USER, 0).
 -define(CHNK_TRK_DELTA, 1).
 -define(CHNK_TRK_SNAPSHOT, 2).
+-define(CHUNK_TYPE_INT_TO_ATOM(T),
+        case T of
+            ?CHNK_USER ->
+                chunk_user;
+            ?CHNK_TRK_DELTA ->
+                chunk_tracking_delta;
+            ?CHNK_TRK_SNAPSHOT ->
+                chunk_tracking_snapshot
+        end).
+
+-define(TRK_TYPE_SEQUENCE, 0).
+-define(TRK_TYPE_OFFSET, 1).
+
+%% Compression types for sub batch entries.
+%% Osiris defines these types but only clients (un)compress.
+-define(COMPRESS_TYPE_NONE, 0).
+-define(COMPRESS_TYPE_GZIP, 1).
+-define(COMPRESS_TYPE_SNAPPY, 2).
+-define(COMPRESS_TYPE_LZ4, 3).
+-define(COMPRESS_TYPE_ZSTD, 4).
+-define(COMPRESS_TYPE_RSVD1, 5).
+-define(COMPRESS_TYPE_RSVD2, 6).
+-define(COMPRESS_TYPE_USER, 7).
+-define(COMPRESS_TYPE_INT_TO_ATOM(T),
+        case T of
+            ?COMPRESS_TYPE_NONE ->
+                compression_none;
+            ?COMPRESS_TYPE_GZIP ->
+                compression_gzip;
+            ?COMPRESS_TYPE_SNAPPY ->
+                compression_snappy;
+            ?COMPRESS_TYPE_LZ4 ->
+                compression_lz4;
+            ?COMPRESS_TYPE_ZSTD ->
+                compression_zstd;
+            ?COMPRESS_TYPE_RSVD1 ->
+                compression_reserved_1;
+            ?COMPRESS_TYPE_RSVD2 ->
+                compression_reserved_2;
+            ?COMPRESS_TYPE_USER ->
+                compression_user_defined
+        end).
 
 -define(SUP, osiris_server_sup).

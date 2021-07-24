@@ -49,14 +49,16 @@
 -type timestamp() :: integer(). % milliseconds since epoch
 -type tail_info() :: {NextOffset :: offset(),
                       Last :: empty | {epoch(), offset(), osiris:timestamp()}}.
--type compression_type() :: 0 | % no compression
-                            1 | % gzip
-                            2 | % snappy
-                            3 | % lz4
-                            4 | % zstd
-                            5 | % reserved
-                            6 | % reserved
-                            7.  % user defined
+-type compression_type() ::
+    ?COMPRESS_TYPE_NONE |
+    ?COMPRESS_TYPE_GZIP |
+    ?COMPRESS_TYPE_SNAPPY |
+    ?COMPRESS_TYPE_LZ4 |
+    ?COMPRESS_TYPE_ZSTD |
+    ?COMPRESS_TYPE_RSVD1 |
+    ?COMPRESS_TYPE_RSVD2 |
+    ?COMPRESS_TYPE_USER.
+
 -type offset_spec() ::
     first |
     last |

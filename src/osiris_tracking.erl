@@ -1,5 +1,7 @@
 -module(osiris_tracking).
 
+-include("osiris.hrl").
+
 -export([
          init/1,
          add/5,
@@ -12,10 +14,6 @@
          overview/1
          ]).
 
-
--define(TRK_TYPE_SEQUENCE, 0).
--define(TRK_TYPE_OFFSET, 1).
--define(TRK_TYPE_TIMESTAMP, 2).
 -define(MAX_WRITERS, 255).
 %% holds static or rarely changing fields
 -record(cfg, {}).

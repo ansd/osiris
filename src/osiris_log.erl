@@ -41,7 +41,8 @@
          update_retention/2,
          evaluate_retention/2,
          directory/1,
-         delete_directory/1]).
+         delete_directory/1,
+         parse/1]).
 
 -define(IDX_VERSION, 1).
 -define(LOG_VERSION, 1).
@@ -1393,7 +1394,7 @@ parse_records(Offs,
               Acc) ->
     parse_records(Offs + 1, Rem, [{Offs, Data} | Acc]);
 parse_records(Offs,
-              <<1:1, %% simple
+              <<1:1, %% batch
                 0:3/unsigned, %% compression type
                 _:4/unsigned, %% reserved
                 NumRecs:16/unsigned,
@@ -1405,7 +1406,7 @@ parse_records(Offs,
     Recs = parse_records(Offs, Data, []),
     parse_records(Offs + NumRecs, Rem, lists:reverse(Recs) ++ Acc);
 parse_records(Offs,
-              <<1:1, %% simple
+              <<1:1, %% batch
                 CompType:3/unsigned, %% compression type
                 _:4/unsigned, %% reserved
                 NumRecs:16/unsigned,
@@ -1989,8 +1990,8 @@ throw_missing({error, enoent}) ->
 throw_missing(Any) ->
     Any.
 
-open(SegFile, Options) ->
-    throw_missing(file:open(SegFile, Options)).
+open(File, Options) ->
+    throw_missing(file:open(File, Options)).
 
 chunk_id_for_timestamp(#seg_info{index = Idx}, Ts) ->
     Fd = open_index_read(Idx),
@@ -2238,3 +2239,195 @@ part_test() ->
     ok.
 
 -endif.
+
+parse(Dir) when is_list(Dir) ->
+    {Time, Result} = timer:tc(
+                       fun() ->
+                               try
+                                   IdxFiles = lists:sort(
+                                                filelib:wildcard(
+                                                  filename:join(Dir, "*.index"))),
+                                   IdxLines = parse_index_files(IdxFiles, []),
+                                   SegFiles = lists:sort(
+                                                filelib:wildcard(
+                                                  filename:join(Dir, "*.segment"))),
+                                   SegLines = parse_segment_files(SegFiles, []),
+                                   IdxLines ++ SegLines
+                               catch
+                                   missing_file ->
+                                       parse(Dir)
+                               end
+                       end),
+    ?DEBUG("~s:~s/~b completed in ~fs", [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Time/1_000_000]),
+    Result.
+
+parse_index_files([], Lines) ->
+    lists:reverse(Lines);
+parse_index_files([IdxFile | IdxFiles], Lines0) ->
+    try
+        {ok, Fd} = open(IdxFile, [read, raw, binary, read_ahead]),
+        case file:read(Fd, ?IDX_HEADER_SIZE) of
+            {ok, ?IDX_HEADER} ->
+                Line = io_lib:format("Parsing index file ~s version ~.b ...", [IdxFile, ?IDX_VERSION]),
+                Lines = parse_index_record(Fd, [Line | Lines0]),
+                ok = file:close(Fd),
+                parse_index_files(IdxFiles, Lines);
+            _ ->
+                Line = io_lib:format("Skipping index file ~s because file header could not be parsed.", [IdxFile]),
+                ok = file:close(Fd),
+                parse_index_files(IdxFiles, [Line | Lines0])
+        end
+    catch
+        missing_file ->
+            %% Index files could be deleted by retention policies while they are parsed.
+            %% Ignore these index files and keep going.
+            Lines0
+    end.
+
+parse_index_record(Fd, Lines) ->
+    case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
+        {ok,
+         <<ChunkId:64/unsigned,
+           Timestamp:64/signed,
+           Epoch:64/unsigned,
+           FilePos:32/unsigned,
+           ChType:8/unsigned>>} ->
+            L = io_lib:format("\toffset ~.b, time ~p, epoch ~.b, position ~.b, type ~s",
+                              [ChunkId,
+                               calendar:system_time_to_rfc3339(Timestamp, [{unit, millisecond}]),
+                               Epoch,
+                               FilePos,
+                               ?CHUNK_TYPE_INT_TO_ATOM(ChType)]),
+            parse_index_record(Fd, [L | Lines]);
+        _ ->
+            Lines
+    end.
+
+parse_segment_files([], Lines) ->
+    lists:reverse(Lines);
+parse_segment_files([SegFile | SegFiles], Lines0) ->
+    try
+        {ok, Fd} = open(SegFile, [read, raw, binary, read_ahead]),
+        case file:read(Fd, ?LOG_HEADER_SIZE) of
+            {ok, ?LOG_HEADER} ->
+                Line = io_lib:format("Parsing segment file ~s version ~.b ...", [SegFile, ?LOG_VERSION]),
+                Lines = parse_chunks(Fd, [Line | Lines0]),
+                ok = file:close(Fd),
+                parse_segment_files(SegFiles, Lines);
+            _ ->
+                Line = io_lib:format("Skipping segment file ~s because file header could not be parsed.", [SegFile]),
+                ok = file:close(Fd),
+                parse_segment_files(SegFiles, [Line | Lines0])
+        end
+    catch
+        missing_file ->
+            %% Segments could be deleted by retention policies while they are parsed.
+            %% Ignore these segments and keep going.
+            Lines0
+    end.
+
+parse_chunks(Fd, Lines0) ->
+    case file:read(Fd, ?HEADER_SIZE_B) of
+        eof ->
+            Lines0;
+        {ok,
+         <<?MAGIC:4/unsigned,
+           ?VERSION:4/unsigned,
+           ChType:8/unsigned,
+           NumEntries:16/unsigned,
+           NumRecords:32/unsigned,
+           Timestamp:64/signed,
+           Epoch:64/unsigned,
+           ChId:64/unsigned,
+           _Crc:32/integer,
+           DataSize:32/unsigned,
+           TrailerSize:32/unsigned,
+           _Reserved:32>>} ->
+            Line = io_lib:format("\tversion ~.b, type ~s, data entries ~.b, records ~.b, time ~p, "
+                                 "epoch ~.b, ID (1st offset) ~.b, data size ~.b, trailer size ~.b",
+                                 [?VERSION,
+                                  ?CHUNK_TYPE_INT_TO_ATOM(ChType),
+                                  NumEntries,
+                                  NumRecords,
+                                  calendar:system_time_to_rfc3339(Timestamp, [{unit, millisecond}]),
+                                  Epoch,
+                                  ChId,
+                                  DataSize,
+                                  TrailerSize]),
+            {ok, ChunkData} = file:read(Fd, DataSize),
+            Lines1 = case ChType of
+                         ?CHNK_USER ->
+                             parse_user_chunk_data_entries(ChunkData, [Line | Lines0]);
+                         _ ->
+                             %% ?CHNK_TRK_DELTA and ?CHNK_TRK_SNAPSHOT are written in a single entry
+                             <<0:1, Size:31, TrackingData:Size/binary>> = ChunkData,
+                             parse_tracking_entries(ChType, TrackingData, [Line | Lines0])
+                     end,
+            {ok, TData} = file:read(Fd, TrailerSize),
+            Lines2 = parse_tracking_entries(ChType, TData, Lines1),
+            parse_chunks(Fd, Lines2)
+    end.
+
+parse_user_chunk_data_entries(<<>>, Lines) ->
+    Lines;
+parse_user_chunk_data_entries(<<0:1,
+                                Len:31/unsigned,
+                                _EntryData:Len/binary,
+                                Rem/binary>>,
+                              Lines) ->
+    L = io_lib:format("\t\tsimple entry: size ~.b", [Len]),
+    %%TODO parse user chunk data body
+    parse_user_chunk_data_entries(Rem, [L | Lines]);
+parse_user_chunk_data_entries(<<1:1, %% batch
+                                CompressionType:3/unsigned,
+                                _Reserved:4/unsigned,
+                                NumRecs:16/unsigned,
+                                UncompressedLen:32/unsigned,
+                                Len:32/unsigned,
+                                _Data:Len/binary,
+                                Rem/binary>>,
+                              Lines) ->
+    L = io_lib:format("\t\tsub batch entry: ~s, records ~.b, "
+                      "uncompressed length ~.b, length ~.b",
+                      [?COMPRESS_TYPE_INT_TO_ATOM(CompressionType),
+                       NumRecs,
+                       UncompressedLen,
+                       Len]),
+    parse_user_chunk_data_entries(Rem, [L | Lines]).
+
+parse_tracking_entries(_ChType, <<>>, Lines) ->
+    Lines;
+parse_tracking_entries(ChType,
+                       <<?TRK_TYPE_OFFSET:8/unsigned,
+                         TrkIdSize:8/unsigned,
+                         TrkId:TrkIdSize/binary,
+                         Offset:64/unsigned,
+                         Rem/binary>>,
+                       Lines) ->
+    L = io_lib:format("\t\toffset tracking entry: tracking ID ~s, offset ~.b",
+                      [TrkId, Offset]),
+    parse_tracking_entries(ChType, Rem, [L | Lines]);
+parse_tracking_entries(ChType,
+                       <<?TRK_TYPE_SEQUENCE:8/unsigned,
+                         TrkIdSize:8/unsigned,
+                         TrkId:TrkIdSize/binary,
+                         Seq:64/unsigned,
+                         Rem/binary>>,
+                       Lines) when ChType =:= ?CHNK_USER; ChType =:= ?CHNK_TRK_DELTA ->
+    L = io_lib:format("\t\tsequence tracking entry: writer ID ~s, sequence ~.b",
+                      [TrkId, Seq]),
+    parse_tracking_entries(ChType, Rem, [L | Lines]);
+parse_tracking_entries(?CHNK_TRK_SNAPSHOT,
+                       <<?TRK_TYPE_SEQUENCE:8/unsigned,
+                         TrkIdSize:8/unsigned,
+                         TrkId:TrkIdSize/binary,
+                         %% In sequence tracking binary, the chunk ID is included in tracking snapshot chunk
+                         %% but not in tracking delta chunk or in trailer of user chunk.
+                         ChId:64/unsigned,
+                         Seq:64/unsigned,
+                         Rem/binary>>,
+                       Lines) ->
+    L = io_lib:format("\t\tsequence tracking entry: writer ID ~s, chunk ID: ~.b, sequence ~.b",
+                      [TrkId, ChId, Seq]),
+    parse_tracking_entries(?CHNK_TRK_SNAPSHOT, Rem, [L | Lines]).
+%%TODO parse timestamp tracking entry
