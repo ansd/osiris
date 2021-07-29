@@ -42,7 +42,9 @@
          evaluate_retention/2,
          directory/1,
          delete_directory/1,
-         parse/1]).
+         parse/2]).
+
+-export([build_log_overview/1]).
 
 -define(IDX_VERSION, 1).
 -define(LOG_VERSION, 1).
@@ -381,11 +383,18 @@
          current_file :: undefined | file:filename(),
          fd :: undefined | file:io_device(),
          index_fd :: undefined | file:io_device()}).
+-record(index_record,
+        {id :: offset(),
+         timestamp :: non_neg_integer(),
+         epoch :: epoch(),
+         file_pos :: non_neg_integer(),
+         type :: chunk_type()}).
 %% record chunk_info does not map exactly to an index record (field 'num' differs)
 -record(chunk_info,
         {id :: offset(),
          timestamp :: non_neg_integer(),
          epoch :: epoch(),
+         %% number of records in the chunk
          num :: non_neg_integer(),
          type :: chunk_type()
         }).
@@ -2240,51 +2249,94 @@ part_test() ->
 
 -endif.
 
-parse(Dir) when is_list(Dir) ->
-    {Time, Result} = timer:tc(
-                       fun() ->
-                               try
-                                   IdxFiles = lists:sort(
-                                                filelib:wildcard(
-                                                  filename:join(Dir, "*.index"))),
-                                   IdxLines = parse_index_files(IdxFiles, []),
-                                   SegFiles = lists:sort(
-                                                filelib:wildcard(
-                                                  filename:join(Dir, "*.segment"))),
-                                   SegLines = parse_segment_files(SegFiles, []),
-                                   IdxLines ++ SegLines
-                               catch
-                                   missing_file ->
-                                       parse(Dir)
-                               end
-                       end),
-    ?DEBUG("~s:~s/~b completed in ~fs", [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Time/1_000_000]),
-    Result.
+% parse(Dir, Options) ->
+    % SegInfos = build_log_overview(Dir),
+    % parse(Dir, 3, 5).
+    %
+% parse(Dir, undefined, undefined) ->
+    % [];
+% parse(Dir, undefined, EndOffset) when EndOffset >= 0 ->
+    % parse0(Dir, EndOffset - 10, EndOffset);
+% parse(Dir, StartOffset, undefined) when StartOffset >= 0 ->
+    % parse0(Dir, StartOffset, StartOffset + 10);
+% parse(Dir, StartOffset, EndOffset) when StartOffset >= 0, StartOffset <= EndOffset ->
+    % [].
 
-parse_index_files([], Lines) ->
-    lists:reverse(Lines);
-parse_index_files([IdxFile | IdxFiles], Lines0) ->
-    try
-        {ok, Fd} = open(IdxFile, [read, raw, binary, read_ahead]),
-        case file:read(Fd, ?IDX_HEADER_SIZE) of
-            {ok, ?IDX_HEADER} ->
-                Line = io_lib:format("Parsing index file ~s version ~.b ...", [IdxFile, ?IDX_VERSION]),
-                Lines = parse_index_record(Fd, [Line | Lines0]),
-                ok = file:close(Fd),
-                parse_index_files(IdxFiles, Lines);
-            _ ->
-                Line = io_lib:format("Skipping index file ~s because file header could not be parsed.", [IdxFile]),
-                ok = file:close(Fd),
-                parse_index_files(IdxFiles, [Line | Lines0])
-        end
-    catch
-        missing_file ->
-            %% Index files could be deleted by retention policies while they are parsed.
-            %% Ignore these index files and keep going.
-            Lines0
+parse(Dir, Opts) ->
+    parse(Dir, Opts, 2).
+
+parse(_Dir, _Opts, 0) ->
+    {error, out_of_retries};
+parse(Dir, #{start_offset := StartOffset, end_offset := EndOffset} = Opts, Retries)
+  when is_list(Dir), is_integer(StartOffset), is_integer(EndOffset),
+       StartOffset >= 0, StartOffset =< EndOffset ->
+    case segment_infos(Dir, StartOffset, EndOffset) of
+        [] ->
+            [];
+        SegInfos ->
+            {Time, Result} =
+            timer:tc(fun() ->
+                             try
+                                 IdxFiles = lists:map(
+                                              fun(#seg_info{index = IdxFile}) ->
+                                                      IdxFile
+                                              end, SegInfos),
+                                 IdxRecords = parse_index_files(IdxFiles, Opts, []),
+                                 IdxLines = index_records_to_lines(IdxRecords),
+                                 #index_record{file_pos = FirstChunkPos} = hd(IdxRecords),
+                                 SegFiles = lists:map(
+                                              fun(#seg_info{file = SegFile}) ->
+                                                      SegFile
+                                              end, SegInfos),
+                                 SegLines = parse_segment_files(SegFiles, FirstChunkPos, EndOffset, []),
+                                 IdxLines ++ SegLines
+                             catch throw:Reason ->
+                                       ?INFO("Failed to parse file due to ~p. "
+                                             "Trying to parse ~.b more time(s)...",
+                                             [Reason, Retries]),
+                                       parse(Dir, Opts, Retries -1)
+                             end
+                     end),
+            ?DEBUG("~s:~s/~b completed in ~fs", [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Time/1_000_000]),
+            Result
     end.
 
-parse_index_record(Fd, Lines) ->
+index_records_to_lines(IdxRecords) ->
+    lists:map(
+      fun(#index_record{
+             id = Id,
+             timestamp = Timestamp,
+             epoch = Epoch,
+             file_pos = FilePos,
+             type = Type}) ->
+              io_lib:format("offset ~.b, time ~p, epoch ~.b, position ~.b, type ~s",
+                            [Id,
+                             calendar:system_time_to_rfc3339(Timestamp, [{unit, millisecond}]),
+                             Epoch,
+                             FilePos,
+                             ?CHUNK_TYPE_INT_TO_ATOM(Type)])
+      end, IdxRecords).
+
+segment_infos(Dir, StartOffset, EndOffset) ->
+    SegInfos = build_log_overview(Dir),
+    lists:filter(fun(#seg_info{first = undefined,
+                               last = undefined}) ->
+                         false;
+                    (#seg_info{first = #chunk_info{id = FirstSegOffset},
+                               last = #chunk_info{id = LastChId, num = LastNumRecs}}) ->
+                         LastSegOffset = LastChId + LastNumRecs - 1,
+                         EndOffset >= FirstSegOffset andalso StartOffset =< LastSegOffset
+                 end, SegInfos).
+
+parse_index_files([], _Opts, Acc) ->
+    lists:reverse(Acc);
+parse_index_files([IdxFile | IdxFiles], Opts, Acc0) ->
+    Fd = open_index_read(IdxFile),
+    Acc1 = parse_index_record(Fd, Opts, Acc0, undefined),
+    ok = file:close(Fd),
+    parse_index_files(IdxFiles, Opts, Acc1).
+
+parse_index_record(Fd, #{start_offset := StartOffset, end_offset := EndOffset} = Opts, Acc0, PrevIndexRec) ->
     case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
         {ok,
          <<ChunkId:64/unsigned,
@@ -2292,41 +2344,72 @@ parse_index_record(Fd, Lines) ->
            Epoch:64/unsigned,
            FilePos:32/unsigned,
            ChType:8/unsigned>>} ->
-            L = io_lib:format("\toffset ~.b, time ~p, epoch ~.b, position ~.b, type ~s",
-                              [ChunkId,
-                               calendar:system_time_to_rfc3339(Timestamp, [{unit, millisecond}]),
-                               Epoch,
-                               FilePos,
-                               ?CHUNK_TYPE_INT_TO_ATOM(ChType)]),
-            parse_index_record(Fd, [L | Lines]);
-        _ ->
-            Lines
+            if
+                ChunkId < StartOffset ->
+                    %% StartOffset is not yet reached, keep going.
+                    %% Store this index record temporarily in case the StartOffset
+                    %% is between this chunk ID and the next chunk ID.
+                    Rec = #index_record{
+                             id = ChunkId,
+                             timestamp = Timestamp,
+                             epoch = Epoch,
+                             file_pos = FilePos,
+                             type = ChType},
+                    parse_index_record(Fd, Opts, Acc0, Rec);
+                true ->
+                    Acc1 = if
+                               ChunkId > StartOffset andalso PrevIndexRec =/= undefined ->
+                                   %% Prepend the previous index record.
+                                   [PrevIndexRec | Acc0];
+                               true ->
+                                   Acc0
+                           end,
+                    Rec = #index_record{
+                             id = ChunkId,
+                             timestamp = Timestamp,
+                             epoch = Epoch,
+                             file_pos = FilePos,
+                             type = ChType},
+                    Acc2 = [Rec | Acc1],
+                    if ChunkId > EndOffset ->
+                           %% This index record is past the requested range.
+                           Acc1;
+                       ChunkId =:= EndOffset ->
+                           %% Start of this index record is the end of the requested range.
+                           %% Include this index record and stop here.
+                           Acc2;
+                       true ->
+                           parse_index_record(Fd, Opts, Acc2, undefined)
+                    end
+            end;
+        eof ->
+            if Acc0 =:= [] andalso PrevIndexRec =/= undefined ->
+                   %% StartOffset starts in the last chunk of the 1st parsed index file.
+                   [PrevIndexRec];
+               true ->
+                   Acc0
+            end;
+        Other ->
+            throw({bad_index_record, Other})
     end.
 
-parse_segment_files([], Lines) ->
+parse_segment_files([], _, _, Lines) ->
     lists:reverse(Lines);
-parse_segment_files([SegFile | SegFiles], Lines0) ->
-    try
-        {ok, Fd} = open(SegFile, [read, raw, binary, read_ahead]),
-        case file:read(Fd, ?LOG_HEADER_SIZE) of
-            {ok, ?LOG_HEADER} ->
-                Line = io_lib:format("Parsing segment file ~s version ~.b ...", [SegFile, ?LOG_VERSION]),
-                Lines = parse_chunks(Fd, [Line | Lines0]),
-                ok = file:close(Fd),
-                parse_segment_files(SegFiles, Lines);
-            _ ->
-                Line = io_lib:format("Skipping segment file ~s because file header could not be parsed.", [SegFile]),
-                ok = file:close(Fd),
-                parse_segment_files(SegFiles, [Line | Lines0])
-        end
-    catch
-        missing_file ->
-            %% Segments could be deleted by retention policies while they are parsed.
-            %% Ignore these segments and keep going.
-            Lines0
-    end.
+parse_segment_files([SegFile | SegFiles], FirstFilePos, EndOffset, Lines0) ->
+    {ok, Fd} = open(SegFile, [read, raw, binary, read_ahead]),
+    if FirstFilePos =/= undefined ->
+           %% In 1st segment file, jump directly to the 1st chunk of the requested offset range.
+           {ok, FirstFilePos} = file:position(Fd, FirstFilePos);
+       true ->
+           %% In subsequent segment files, parse chunks from segment start.
+           {ok, ?LOG_HEADER_SIZE} = file:position(Fd, ?LOG_HEADER_SIZE)
+    end,
+    L = io_lib:format("Parsing segment file ~s version ~.b ...", [SegFile, ?LOG_VERSION]),
+    Lines = parse_chunks(Fd, [L | Lines0], EndOffset),
+    ok = file:close(Fd),
+    parse_segment_files(SegFiles, undefined, EndOffset, Lines).
 
-parse_chunks(Fd, Lines0) ->
+parse_chunks(Fd, Lines0, EndOffset) ->
     case file:read(Fd, ?HEADER_SIZE_B) of
         eof ->
             Lines0;
@@ -2343,29 +2426,33 @@ parse_chunks(Fd, Lines0) ->
            DataSize:32/unsigned,
            TrailerSize:32/unsigned,
            _Reserved:32>>} ->
-            Line = io_lib:format("\tversion ~.b, type ~s, data entries ~.b, records ~.b, time ~p, "
-                                 "epoch ~.b, ID (1st offset) ~.b, data size ~.b, trailer size ~.b",
-                                 [?VERSION,
-                                  ?CHUNK_TYPE_INT_TO_ATOM(ChType),
-                                  NumEntries,
-                                  NumRecords,
-                                  calendar:system_time_to_rfc3339(Timestamp, [{unit, millisecond}]),
-                                  Epoch,
-                                  ChId,
-                                  DataSize,
-                                  TrailerSize]),
-            {ok, ChunkData} = file:read(Fd, DataSize),
-            Lines1 = case ChType of
-                         ?CHNK_USER ->
-                             parse_user_chunk_data_entries(ChunkData, [Line | Lines0]);
-                         _ ->
-                             %% ?CHNK_TRK_DELTA and ?CHNK_TRK_SNAPSHOT are written in a single entry
-                             <<0:1, Size:31, TrackingData:Size/binary>> = ChunkData,
-                             parse_tracking_entries(ChType, TrackingData, [Line | Lines0])
-                     end,
-            {ok, TData} = file:read(Fd, TrailerSize),
-            Lines2 = parse_tracking_entries(ChType, TData, Lines1),
-            parse_chunks(Fd, Lines2)
+            if ChId > EndOffset ->
+                   Lines0;
+               true ->
+                   Line = io_lib:format("\tversion ~.b, type ~s, data entries ~.b, records ~.b, time ~p, "
+                                        "epoch ~.b, ID (1st offset) ~.b, data size ~.b, trailer size ~.b",
+                                        [?VERSION,
+                                         ?CHUNK_TYPE_INT_TO_ATOM(ChType),
+                                         NumEntries,
+                                         NumRecords,
+                                         calendar:system_time_to_rfc3339(Timestamp, [{unit, millisecond}]),
+                                         Epoch,
+                                         ChId,
+                                         DataSize,
+                                         TrailerSize]),
+                   {ok, ChunkData} = file:read(Fd, DataSize),
+                   Lines1 = case ChType of
+                                ?CHNK_USER ->
+                                    parse_user_chunk_data_entries(ChunkData, [Line | Lines0]);
+                                _ ->
+                                    %% ?CHNK_TRK_DELTA and ?CHNK_TRK_SNAPSHOT are written in a single entry
+                                    <<0:1, Size:31, TrackingData:Size/binary>> = ChunkData,
+                                    parse_tracking_entries(ChType, TrackingData, [Line | Lines0])
+                            end,
+                   {ok, TData} = file:read(Fd, TrailerSize),
+                   Lines2 = parse_tracking_entries(ChType, TData, Lines1),
+                   parse_chunks(Fd, Lines2, EndOffset)
+            end
     end.
 
 parse_user_chunk_data_entries(<<>>, Lines) ->
