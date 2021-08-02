@@ -55,6 +55,7 @@
 
 -define(TRK_TYPE_SEQUENCE, 0).
 -define(TRK_TYPE_OFFSET, 1).
+-define(TRK_TYPE_TIMESTAMP, 2).
 
 %% Compression types for sub batch entries.
 %% Osiris defines these types but only clients (un)compress.

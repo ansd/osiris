@@ -2311,7 +2311,7 @@ index_records_to_lines(IdxRecords) ->
              type = Type}) ->
               io_lib:format("offset ~.b, time ~p, epoch ~.b, position ~.b, type ~s",
                             [Id,
-                             calendar:system_time_to_rfc3339(Timestamp, [{unit, millisecond}]),
+                             timestamp_to_rfc3339(Timestamp),
                              Epoch,
                              FilePos,
                              ?CHUNK_TYPE_INT_TO_ATOM(Type)])
@@ -2435,7 +2435,7 @@ parse_chunks(Fd, Lines0, EndOffset) ->
                                          ?CHUNK_TYPE_INT_TO_ATOM(ChType),
                                          NumEntries,
                                          NumRecords,
-                                         calendar:system_time_to_rfc3339(Timestamp, [{unit, millisecond}]),
+                                         timestamp_to_rfc3339(Timestamp),
                                          Epoch,
                                          ChId,
                                          DataSize,
@@ -2516,5 +2516,17 @@ parse_tracking_entries(?CHNK_TRK_SNAPSHOT,
                        Lines) ->
     L = io_lib:format("\t\tsequence tracking entry: writer ID ~s, chunk ID: ~.b, sequence ~.b",
                       [TrkId, ChId, Seq]),
-    parse_tracking_entries(?CHNK_TRK_SNAPSHOT, Rem, [L | Lines]).
-%%TODO parse timestamp tracking entry
+    parse_tracking_entries(?CHNK_TRK_SNAPSHOT, Rem, [L | Lines]);
+parse_tracking_entries(ChType,
+                       <<?TRK_TYPE_TIMESTAMP:8/unsigned,
+                         TrkIdSize:8/unsigned,
+                         TrkId:TrkIdSize/binary,
+                         Timestamp:64/signed,
+                         Rem/binary>>,
+                       Lines) ->
+    L = io_lib:format("\t\ttimestamp tracking entry: tracking ID ~s, time ~p",
+                      [TrkId, timestamp_to_rfc3339(Timestamp)]),
+    parse_tracking_entries(ChType, Rem, [L | Lines]).
+
+timestamp_to_rfc3339(Ts) ->
+    calendar:system_time_to_rfc3339(Ts, [{unit, millisecond}]).
