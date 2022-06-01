@@ -30,7 +30,8 @@
          terminate/2,
          format_status/1,
          stop/1,
-         delete/1]).
+         delete/1,
+         set_prio/2]).
 
 -define(C_COMMITTED_OFFSET, ?C_NUM_LOG_FIELDS + 1).
 -define(C_READERS, ?C_NUM_LOG_FIELDS + 2).
@@ -160,6 +161,7 @@ handle_continue(#{name := Name,
     Dir = osiris_log:directory(Config),
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
+    % process_flag(priority, high),
     ORef = atomics:new(2, [{signed, true}]),
     CntName = {?MODULE, ExtRef},
     Log = osiris_log:init(Config#{dir => Dir,
@@ -212,14 +214,18 @@ handle_batch(Commands,
                       tracking = Trk0} =
                  State0) ->
 
+    % T0 = erlang:monotonic_time(millisecond),
+
     %% process commands in reverse order
     case catch lists:foldr(fun handle_command/2,
                            {State0, [], [], #{}, Trk0, []}, Commands) of
         {#?MODULE{log = Log0} = State1, Entries, Replies, Corrs, Trk1, Dupes} ->
             Now = erlang:system_time(millisecond),
+            % T1 = erlang:monotonic_time(millisecond),
             ThisBatchOffs = osiris_log:next_offset(Log0),
             NeedsFlush = osiris_tracking:needs_flush(Trk1),
             {TrkBin, Trk2} = osiris_tracking:flush(Trk1),
+            % T21 = erlang:monotonic_time(millisecond),
             Log1 = case Entries of
                        [] when NeedsFlush ->
                            %% TODO: we could set a timer for explicit tracking delta
@@ -236,7 +242,9 @@ handle_batch(Commands,
                                             TrkBin,
                                             Log0)
                    end,
+            % T22 = erlang:monotonic_time(millisecond),
             HasTracking = not osiris_tracking:is_empty(Trk2),
+            % T3 = erlang:monotonic_time(millisecond),
             {Log, Trk} = case osiris_log:is_open(Log1) of
                              false when HasTracking ->
                                  %% the log was closed, i.e. full
@@ -258,6 +266,7 @@ handle_batch(Commands,
                                State1#?MODULE{tracking = Trk,
                                               log = Log}),
 
+            % T4 = erlang:monotonic_time(millisecond),
             LastChId =
                 case osiris_log:tail_info(State2#?MODULE.log) of
                     {_, {_, TailChId, _TailTs}} ->
@@ -271,6 +280,7 @@ handle_batch(Commands,
 
             COffs = agreed_commit(AllChIds),
 
+            % T5 = erlang:monotonic_time(millisecond),
             RemDupes = handle_duplicates(COffs, Dupes ++ Dupes0, Cfg),
             %% if committed offset has increased - update
             State =
@@ -286,8 +296,21 @@ handle_batch(Commands,
                     false ->
                         State2#?MODULE{duplicates = RemDupes}
                 end,
+
+            Res = notify_offset_listeners(notify_data_listeners(State)),
+
+            % T6 = erlang:monotonic_time(millisecond),
+
+            % case T6 - T0 of
+            %     Elap when Elap > 50 ->
+            %         ?DEBUG("osiris_writer:handle_batch/2: ~w ~w ~w ~w ~w ~w ~w",
+            %                [T1 - T0, T21 - T1, T22 - T21, T3 - T22, T4 - T3, T5 - T4, T6 - T5]);
+            %     _ ->
+            %         ok
+            % end,
+
             {ok, [garbage_collect | Replies],
-             notify_offset_listeners(notify_data_listeners(State))};
+             Res};
         {stop, normal} ->
             {stop, normal}
     end.
@@ -362,6 +385,39 @@ handle_duplicates(CommittedOffset, Dupes, #cfg{} = Cfg)
                     {[], #{}}, Dupes),
     send_written_events(Cfg, Corrs),
     Rem.
+
+handle_command({cast, {write, Pid, WriterId, {Corr, debug}, R}},
+               {#?MODULE{log = Log} = State, Records, Replies, Corrs0, Trk, Dupes}) ->
+
+    ?DEBUG("osiris_writer: writing ~p", [Corr]),
+
+    case is_duplicate(WriterId, Corr, State, Trk) of
+        {false, _} ->
+            Corrs =
+                maps:update_with({Pid, WriterId},
+                                 fun(C) -> [Corr | C] end,
+                                 [Corr],
+                                 Corrs0),
+            ChId = osiris_log:next_offset(Log),
+            Res = put_writer(WriterId, ChId, Corr, Trk),
+
+            ?DEBUG("osiris_writer: wrote ~p", [Corr]),
+
+            {State,
+             [R | Records],
+             Replies,
+             Corrs,
+             Res,
+             Dupes};
+        {true, ChId} ->
+            %% add write to duplications list
+            {State,
+             Records,
+             Replies,
+             Corrs0,
+             Trk,
+             [{ChId, Pid, WriterId, Corr} | Dupes]}
+    end;
 
 handle_command({cast, {write, Pid, WriterId, Corr, R}},
                {#?MODULE{log = Log} = State, Records, Replies, Corrs0, Trk, Dupes}) ->
@@ -510,6 +566,16 @@ handle_command({call, From, {update_retention, Retention}},
     Log = osiris_log:update_retention(Retention, Log0),
     Replies = [{reply, From, ok} | Replies0],
     {State#?MODULE{log = Log}, Records, Replies, Corrs, Trk, Dupes};
+handle_command({call, From, {prio, Prio}},
+               {State,
+                Records,
+                Replies0,
+                Corrs,
+                Trk,
+                Dupes}) ->
+    Old = process_flag(priority, Prio),
+    Replies = [{reply, From, Old} | Replies0],
+    {State, Records, Replies, Corrs, Trk, Dupes};
 handle_command(osiris_stop, _Acc) ->
     throw({stop, normal});
 handle_command(_Unk, Acc) ->
@@ -566,6 +632,7 @@ send_written_events(#cfg{reference = ExtRef,
                      %% TODO: if the writer is on a remote node this could block
                      %% which is bad but we'd have to consider the downsides of using
                      %% send with noconnect and nosuspend here
+                     %%TODO log if debug flag set
                      % ?DEBUG("send_written_events ~s ~w", [ExtRef, V]),
                      P ! wrap_osiris_event(Fmt,
                                            {osiris_written,
@@ -596,4 +663,12 @@ is_duplicate(WriterId, Corr, #?MODULE{log = _Log}, Trk) ->
             {Corr =< Seq, ChunkId};
         {error, not_found} ->
             {false, 0}
+    end.
+
+set_prio(Pid, Prio) when node(Pid) == node() ->
+    case erlang:is_process_alive(Pid) of
+        true ->
+            gen_batch_server:call(Pid, {prio, Prio});
+        false ->
+            {error, no_process}
     end.

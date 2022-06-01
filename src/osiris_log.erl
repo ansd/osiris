@@ -576,8 +576,17 @@ write([_ | _] = Entries,
           State0) ->
     %% we need to open a new segment here to ensure tracking chunk
     %% is made before the one that triggers the new segment to be created
-    trigger_retention_eval(
-      write(Entries, ChType, Now, Trailer, open_new_segment(State0)));
+    T0 = erlang:monotonic_time(millisecond),
+    Res = trigger_retention_eval(
+            write(Entries, ChType, Now, Trailer, open_new_segment(State0))),
+    T1 = erlang:monotonic_time(millisecond),
+    case T1 - T0 of
+        Elap when Elap > 50 ->
+            ?DEBUG("~s ~s 1: ~w", [?MODULE, ?FUNCTION_NAME, T1 - T0]);
+        _ ->
+            ok
+    end,
+    Res;
 write([_ | _] = Entries,
       ChType,
       Now,
@@ -589,11 +598,20 @@ write([_ | _] = Entries,
           State0)
     when is_integer(Now)
          andalso is_integer(ChType) ->
+    T0 = erlang:monotonic_time(millisecond),
     %% The osiris writer always pass Entries in the reversed order
     %% in order to avoid unnecessary lists rev|trav|ersals
     {ChunkData, NumRecords} =
         make_chunk(Entries, Trailer, ChType, Now, Epoch, Next),
-    write_chunk(ChunkData, ChType, Now, Epoch, NumRecords, State0);
+    Res = write_chunk(ChunkData, ChType, Now, Epoch, NumRecords, State0),
+    T1 = erlang:monotonic_time(millisecond),
+    case T1 - T0 of
+        Elap when Elap > 50 ->
+            ?DEBUG("~s ~s 2: ~w", [?MODULE, ?FUNCTION_NAME, T1 - T0]);
+        _ ->
+            ok
+    end,
+    Res;
 write([], _ChType, _Now, _Writers, State) ->
     State.
 
@@ -1772,6 +1790,7 @@ segment_from_index_file(IdxFile) ->
     SegFile0 ++ ".segment".
 
 make_chunk(Blobs, TData, ChType, Timestamp, Epoch, Next) ->
+    T0 = erlang:monotonic_time(millisecond),
     {NumEntries, NumRecords, EData} =
         lists:foldl(fun ({batch, NumRecords, CompType, UncompLen, B},
                          {Entries, Count, Acc}) ->
@@ -1795,7 +1814,7 @@ make_chunk(Blobs, TData, ChType, Timestamp, Epoch, Next) ->
     TSize = iolist_size(TData),
     %% checksum is over entry data only
     Crc = erlang:crc32(EData),
-    {[<<?MAGIC:4/unsigned,
+    Res = {[<<?MAGIC:4/unsigned,
         ?VERSION:4/unsigned,
         ChType:8/unsigned,
         NumEntries:16/unsigned,
@@ -1808,7 +1827,16 @@ make_chunk(Blobs, TData, ChType, Timestamp, Epoch, Next) ->
         TSize:32/unsigned,
         0:32/unsigned>>,
       EData, TData],
-     NumRecords}.
+     NumRecords},
+    T1 = erlang:monotonic_time(millisecond),
+    case T1 - T0 of
+        Elap when Elap > 50 ->
+            ?DEBUG("~s ~s: ChType=~p NumEntries=~p NumRecords=~p ~w",
+                   [?MODULE, ?FUNCTION_NAME, ChType, NumEntries, NumRecords, T1 - T0]);
+        _ ->
+            ok
+    end,
+    Res.
 
 write_chunk(_Chunk,
             _ChType,
@@ -1831,11 +1859,15 @@ write_chunk(Chunk,
                                 tail_info = {Next, _}} =
                              Write} =
                 State) ->
+    T0 = erlang:monotonic_time(millisecond),
     NextOffset = Next + NumRecords,
     Size = iolist_size(Chunk),
+    T1 = erlang:monotonic_time(millisecond),
     {ok, Cur} = file:position(Fd, cur),
+    T2 = erlang:monotonic_time(millisecond),
     ok = file:write(Fd, Chunk),
 
+    T3 = erlang:monotonic_time(millisecond),
     ok =
         file:write(IdxFd,
                    <<Next:64/unsigned,
@@ -1843,10 +1875,11 @@ write_chunk(Chunk,
                      Epoch:64/unsigned,
                      Cur:32/unsigned,
                      ChType:8/unsigned>>),
+    T4 = erlang:monotonic_time(millisecond),
     %% update counters
     counters:put(CntRef, ?C_OFFSET, NextOffset - 1),
     counters:add(CntRef, ?C_CHUNKS, 1),
-    case max_segment_size_reached(Fd, SegSizeChunks, Cfg) of
+    Res = case max_segment_size_reached(Fd, SegSizeChunks, Cfg) of
         true ->
             %% close the current file
             ok = file:close(Fd),
@@ -1864,7 +1897,16 @@ write_chunk(Chunk,
                                               {NextOffset,
                                                {Epoch, Next, Timestamp}},
                                           segment_size = {SegSizeBytes + Size, SegSizeChunks + 1}}}
-    end.
+    end,
+    T5 = erlang:monotonic_time(millisecond),
+    case T5 - T0 of
+        Elap when Elap > 50 ->
+            ?DEBUG("~s ~s ChType=~p: NumRecords=~p, ~w ~w ~w ~w ~w",
+                   [?MODULE, ?FUNCTION_NAME, ChType, NumRecords, T1 - T0, T2 - T1, T3 - T2, T4 - T3, T5 - T4]);
+        _ ->
+            ok
+    end,
+    Res.
 
 max_segment_size_reached(SegFd, CurrentSizeChunks,
             #cfg{max_segment_size_bytes = MaxSizeBytes,
